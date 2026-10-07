@@ -1,0 +1,100 @@
+name: Publish verified Tambat 1.2.2
+on:
+  workflow_dispatch:
+    inputs:
+      release_payload:
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      RELEASE_PAYLOAD: ${{ inputs.release_payload }}
+    steps:
+      - name: Verify and publish the existing release draft
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+          const { spawnSync } = require('node:child_process');
+          const expectedAssets = {"Tambat_1.2.2_amd64.AppImage":{"size":85092856,"digest":"sha256:78ec1182099b3a93ba804be889379675b85b8c0759cd56e1ec59c020ebc3380e"},"Tambat_1.2.2_amd64.AppImage.sig":{"size":416,"digest":"sha256:a3f2792402d636d18bd3ad8fa68596f5ddba711f43b98b60b7e843b735adabf0"},"Tambat_1.2.2_amd64.deb":{"size":5097248,"digest":"sha256:95cc1659a13994aa030469d79d6e90ee281ce418ee62e097ec497906e9710aa7"},"Tambat-1.2.2-1.x86_64.rpm":{"size":5097836,"digest":"sha256:c6d88ee4734e3c1899a12bd4db53422a776663303b2616eb6439bfc98a30950c"},"Tambat_1.2.2_x64_en-US.msi":{"size":4997120,"digest":"sha256:628032453784c571b625fa79a974aab8a9e8c9b5badd9afed1f04714c57c65dd"},"Tambat_1.2.2_x64-setup.exe":{"size":3513099,"digest":"sha256:1e8dd0a1316cc4de8f1a513eb2e155e20e4c937136174bc9f638b71a8fe5d71e"},"Tambat_1.2.2_x64-setup.exe.sig":{"size":416,"digest":"sha256:89e97b67c03c8392f335f4f40a2dcf318e55f8a73b6eadc33d2cdab4c86ea8ed"},"Tambat_1.2.2_aarch64.dmg":{"size":5734683,"digest":"sha256:d1ced657b3f65bda466eb33158909d2594ffee95bd7ce45c053869f83b40af1d"},"Tambat_aarch64.app.tar.gz":{"size":5833817,"digest":"sha256:1b875a0dcfce5d2f2c5ce1c7b7d28bffbf7aed47743d5df2de4e53f43ec2dba1"},"Tambat_aarch64.app.tar.gz.sig":{"size":404,"digest":"sha256:7b5a0676e67ed418ce834eb35acce41153b4e9f74c7c804151dc9e066b193ff1"},"Tambat_1.2.2_x64.dmg":{"size":5790540,"digest":"sha256:5c174e4f1a5a0a7833f6bb089b634ddfa12cc08810e5aa579d304ed4d833a8a9"},"Tambat_x64.app.tar.gz":{"size":5844388,"digest":"sha256:aaba4424b3f2c768756a767ad823ba62053d0878237bd7a269beef3b03cc37be"},"Tambat_x64.app.tar.gz.sig":{"size":404,"digest":"sha256:8bce4199fbc47dbf5be30aae74d858618dd475482e923037135a4b440228b0b0"},"latest.json":{"size":2423,"digest":"sha256:1890b02c9b1ea136a627c75136e9023a8092d4b2d551a4b243699c93dd84418d"}};
+          const expectedArtifacts = {
+            'bundle-Linux-X64': '943ee898199259ee05ccc0674cf42f39463027503a1d6146146712201af5cca8',
+            'bundle-Windows-X64': '31f74612a1ba3d8ac8a4170d0a4fb867c6a82988d556d028c108a5d1708b03ca',
+            'bundle-macOS-ARM64': 'd9c17ca1d3aac10b34ce2f65a3cbc6948c625698257094e9abf5368a36cf1d25',
+            'bundle-macOS-X64': 'b4f32fd1609a7afc0d2f3816ab77b75fc1182f57b55ae8b650c09fa51cef7918',
+          };
+          const hash = data => `sha256:${crypto.createHash('sha256').update(data).digest('hex')}`;
+          (async () => {
+            const payload = JSON.parse(process.env.RELEASE_PAYLOAD);
+            for (const url of Object.values(payload.urls)) console.log(`::add-mask::${url}`);
+            const base = 'https://api.github.com/repos/CharisChakim/tambat-releases';
+            const api = async (url, options = {}) => {
+              const response = await fetch(url, { ...options, headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', ...options.headers }, signal: AbortSignal.timeout(120000) });
+              if (!response.ok) throw Error(`GitHub API status ${response.status}`);
+              return response.status === 204 ? null : response.json();
+            };
+            let release = await api(`${base}/releases/405580047`);
+            if (!release.draft || release.tag_name !== 'v1.2.2') throw Error('Expected draft not found');
+            if (Object.keys(payload.urls).length !== 4) throw Error('Unexpected artifact count');
+            const root = path.join(process.env.RUNNER_TEMP, 'tambat-verified-release');
+            fs.mkdirSync(root);
+            const walk = p => fs.statSync(p).isDirectory() ? fs.readdirSync(p).flatMap(n => walk(path.join(p, n))) : [p];
+            const files = [];
+            for (const [name, digest] of Object.entries(expectedArtifacts)) {
+              const url = new URL(payload.urls[name]);
+              if (url.protocol !== 'https:' || !url.hostname.endsWith('.blob.core.windows.net')) throw Error('Unexpected artifact storage');
+              const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
+              if (!response.ok) throw Error('Artifact download failed');
+              const zip = Buffer.from(await response.arrayBuffer());
+              if (hash(zip) !== `sha256:${digest}`) throw Error('Artifact checksum mismatch');
+              const zipPath = path.join(root, `${name}.zip`);
+              fs.writeFileSync(zipPath, zip);
+              const listing = spawnSync('unzip', ['-Z1', zipPath], { encoding: 'utf8' });
+              if (listing.status !== 0 || listing.stdout.trim().split(/\r?\n/).some(p => /^(?:\/|\\|[a-z]:)/i.test(p) || p.split(/[\\/]/).includes('..'))) throw Error('Invalid archive paths');
+              const destination = path.join(root, name);
+              fs.mkdirSync(destination);
+              if (spawnSync('unzip', ['-q', zipPath, '-d', destination]).status !== 0) throw Error('Extraction failed');
+              for (let file of walk(destination)) {
+                const arch = name === 'bundle-macOS-ARM64' ? 'aarch64' : name === 'bundle-macOS-X64' ? 'x64' : null;
+                if (arch && /\.app\.tar\.gz(\.sig)?$/.test(file)) {
+                  const renamed = file.replace(/\.app\.tar\.gz/, `_${arch}.app.tar.gz`);
+                  fs.renameSync(file, renamed);
+                  file = renamed;
+                }
+                files.push(file);
+              }
+              console.log(`Verified artifact ${name}`);
+            }
+            const manifest = path.join(root, 'latest.json');
+            fs.writeFileSync(manifest, payload.manifest);
+            files.push(manifest);
+            if (files.length !== 14 || new Set(files.map(p => path.basename(p))).size !== 14) throw Error('Unexpected release file set');
+            const uploadBase = release.upload_url.split('{')[0];
+            if (uploadBase !== 'https://uploads.github.com/repos/CharisChakim/tambat-releases/releases/405580047/assets') throw Error('Unexpected upload host');
+            for (const file of files) {
+              const name = path.basename(file), data = fs.readFileSync(file), spec = expectedAssets[name];
+              if (!spec || data.length !== spec.size || hash(data) !== spec.digest) throw Error('Release file checksum mismatch');
+              const existing = release.assets.find(a => a.name === name);
+              if (existing?.state === 'uploaded' && existing.size === spec.size && existing.digest === spec.digest) {
+                console.log(`Verified existing asset ${name}`);
+                continue;
+              }
+              if (existing) await api(`${base}/releases/assets/${existing.id}`, { method: 'DELETE' });
+              const asset = await api(`${uploadBase}?name=${encodeURIComponent(name)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(data.length) }, body: data });
+              if (asset.state !== 'uploaded' || asset.size !== spec.size || asset.digest !== spec.digest) throw Error('Uploaded asset checksum mismatch');
+              console.log(`Verified uploaded asset ${name}`);
+            }
+            const assets = await api(`${base}/releases/405580047/assets?per_page=100`);
+            if (assets.length !== 14 || assets.some(a => !expectedAssets[a.name] || a.state !== 'uploaded' || a.size !== expectedAssets[a.name].size || a.digest !== expectedAssets[a.name].digest)) throw Error('Final release validation failed');
+            const published = await api(`${base}/releases/405580047`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft: false, make_latest: 'true' }) });
+            if (published.draft) throw Error('Release remained a draft');
+            console.log(`Published ${published.html_url} with ${assets.length} verified assets`);
+          })().catch(error => { console.error(`Release stopped: ${error.name}`); process.exitCode = 1; });
+          NODE
